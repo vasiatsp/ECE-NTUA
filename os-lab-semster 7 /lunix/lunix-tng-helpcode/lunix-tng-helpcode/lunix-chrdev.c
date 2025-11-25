@@ -4,7 +4,7 @@
  * Implementation of character devices
  * for Lunix:TNG
  *
- * vasiliki tsiplakidi - el22636
+ * 
  *
  */
 
@@ -113,7 +113,7 @@ static int lunix_chrdev_state_update(struct lunix_chrdev_state_struct *state)
     default:
         return -EINVAL;
     } 
-    state->buf_lim = sprintf(state->buf_data, "%ld.%03ld", lookup_value / 1000, lookup_value % 1000); 
+    state->buf_lim = sprintf(state->buf_data, "%ld.%03ld  ", lookup_value / 1000, lookup_value % 1000); 
     state->buf_timestamp = last_update;
     /* END OF MY CODE */
 
@@ -222,32 +222,29 @@ static long lunix_chrdev_ioctl(struct file *filp, unsigned int cmd, unsigned lon
 
 static ssize_t lunix_chrdev_read(struct file *filp, char __user *usrbuf, size_t cnt, loff_t *f_pos)
 {
-	ssize_t ret;
+    ssize_t ret;
 
-	struct lunix_sensor_struct *sensor;
-	struct lunix_chrdev_state_struct *state;
+    struct lunix_sensor_struct *sensor;
+    struct lunix_chrdev_state_struct *state;
 
-	state = filp->private_data;
-	WARN_ON(!state);
+    state = filp->private_data;
+    WARN_ON(!state);
 
-	sensor = state->sensor;
-	WARN_ON(!sensor);
+    sensor = state->sensor;
+    WARN_ON(!sensor);
 
-	/* MY CODE - Lock */
+    /* MY CODE - Lock */
     if (down_interruptible(&state->lock))
         return -ERESTARTSYS;
-	
+    
     /* Auto-rewind on EOF mode? */
-	/* ? */
     if (state->auto_rewind_flag && *f_pos >= state->buf_lim)
         *f_pos = 0;
 
     /*
-	 * If the cached character device state needs to be
-	 * updated by actual sensor data (i.e. we need to report
-	 * on a "fresh" measurement, do so
-	 */
-	if (*f_pos == 0) {
+     * If the cached character device state needs to be updated and we are at the start.
+     */
+    if (*f_pos == 0) {
         // Non blocking mode
         if (filp->f_flags & O_NONBLOCK) {
             if (lunix_chrdev_state_update(state) == -EAGAIN) {
@@ -255,51 +252,131 @@ static ssize_t lunix_chrdev_read(struct file *filp, char __user *usrbuf, size_t 
                 goto out;
             }
         }
-        // Blocking mode
+        // Blocking mode: Wait until new data has come
         else {
             while (lunix_chrdev_state_update(state) == -EAGAIN) {
-                /* ? */
-                /* The process needs to sleep */
-                /* See LDD3, page 153 for a hint */
-
                 up(&state->lock);        
-
-                // Wait until new data has come
                 if(wait_event_interruptible(sensor->wq, lunix_chrdev_state_needs_refresh(state)))
                     return -ERESTARTSYS;
-
                 if (down_interruptible(&state->lock))
                     return -ERESTARTSYS;
             }
         }
-	}
+    }
 
-	/* End of file */
-	/* ? */
-    /* MY CODE */
+    /* * 1. End of file: If we reach the end of the buffered data, 
+     * we must immediately reset f_pos to 0 and return 0 bytes read.
+     * The next call will then start at f_pos=0 and block in the while loop above.
+     */
     if (*f_pos >= state->buf_lim) {
-        ret = 0;
+        *f_pos = 0; // Επαναφορά θέσης για συνεχή ροή (streaming)
+        ret = 0;    // Επιστρέφουμε 0 bytes (EOF), ώστε η εφαρμογή να καλέσει ξανά read()
         goto out;
     }
-    /* END OF MY CODE */
 
-	/* Determine the number of cached bytes to copy to userspace */
-	/* ? */
-    /* MY CODE */ 
-	ssize_t bytes_to_copy = min_t(ssize_t, cnt, state->buf_lim - *f_pos);
+    /* 2. Determine the number of cached bytes to copy to userspace */
+    ssize_t bytes_to_copy = min_t(ssize_t, cnt, state->buf_lim - *f_pos);
+    
     if (copy_to_user(usrbuf, state->buf_data + *f_pos, bytes_to_copy)) {
         ret = -EFAULT;
         goto out;
     }
+    
     *f_pos += bytes_to_copy;
     ret = bytes_to_copy;
-    /* END OF MY CODE */
-	
+    
+    /* * 3. After a successful copy, if we've reached the end of the buffer, 
+     * reset f_pos to 0. This ensures that the next read starts from the beginning 
+     * of the buffer and hits the blocking logic (if (*f_pos == 0)).
+     */
+    if (*f_pos >= state->buf_lim) {
+        *f_pos = 0;
+    }
+
 out:
-	/* MY CODE - Unlock? */
     up(&state->lock);
-	return ret;
+    return ret;
 }
+// static ssize_t lunix_chrdev_read(struct file *filp, char __user *usrbuf, size_t cnt, loff_t *f_pos)
+// {
+// 	ssize_t ret;
+
+// 	struct lunix_sensor_struct *sensor;
+// 	struct lunix_chrdev_state_struct *state;
+
+// 	state = filp->private_data;
+// 	WARN_ON(!state);
+
+// 	sensor = state->sensor;
+// 	WARN_ON(!sensor);
+
+// 	/* MY CODE - Lock */
+//     if (down_interruptible(&state->lock))
+//         return -ERESTARTSYS;
+	
+//     /* Auto-rewind on EOF mode? */
+// 	/* ? */
+//     if (state->auto_rewind_flag && *f_pos >= state->buf_lim)
+//         *f_pos = 0;
+
+//     /*
+// 	 * If the cached character device state needs to be
+// 	 * updated by actual sensor data (i.e. we need to report
+// 	 * on a "fresh" measurement, do so
+// 	 */
+// 	if (*f_pos == 0) {
+//         // Non blocking mode
+//         if (filp->f_flags & O_NONBLOCK) {
+//             if (lunix_chrdev_state_update(state) == -EAGAIN) {
+//                 ret = -EAGAIN;
+//                 goto out;
+//             }
+//         }
+//         // Blocking mode
+//         else {
+//             while (lunix_chrdev_state_update(state) == -EAGAIN) {
+//                 /* ? */
+//                 /* The process needs to sleep */
+//                 /* See LDD3, page 153 for a hint */
+
+//                 up(&state->lock);        
+
+//                 // Wait until new data has come
+//                 if(wait_event_interruptible(sensor->wq, lunix_chrdev_state_needs_refresh(state)))
+//                     return -ERESTARTSYS;
+
+//                 if (down_interruptible(&state->lock))
+//                     return -ERESTARTSYS;
+//             }
+//         }
+// 	}
+
+// 	/* End of file */
+// 	/* ? */
+//     /* MY CODE */
+//     if (*f_pos >= state->buf_lim) {
+//         ret = 0;
+//         goto out;
+//     }
+//     /* END OF MY CODE */
+
+// 	/* Determine the number of cached bytes to copy to userspace */
+// 	/* ? */
+//     /* MY CODE */ 
+// 	ssize_t bytes_to_copy = min_t(ssize_t, cnt, state->buf_lim - *f_pos);
+//     if (copy_to_user(usrbuf, state->buf_data + *f_pos, bytes_to_copy)) {
+//         ret = -EFAULT;
+//         goto out;
+//     }
+//     *f_pos += bytes_to_copy;
+//     ret = bytes_to_copy;
+//     /* END OF MY CODE */
+	
+// out:
+// 	/* MY CODE - Unlock? */
+//     up(&state->lock);
+// 	return ret;
+// }
 
 static int lunix_chrdev_mmap(struct file *filp, struct vm_area_struct *vma)
 {
